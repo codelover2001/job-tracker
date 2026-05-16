@@ -4,11 +4,17 @@ import {
   MapPin, Briefcase, Calendar, FileText, User, Link as LinkIcon,
   StickyNote, ChevronRight, Filter, Download, Upload, BarChart3,
   Building2, AlertCircle, CheckCircle2, Clock, Send, Loader2,
-  ArrowUpDown, Eye
+  ArrowUpDown, Eye, LayoutGrid, List as ListIcon, Sparkles,
+  MessageSquare, Mail, FileEdit, Copy, ChevronDown, ChevronUp,
+  GripVertical, Users, Code2, Settings, ClipboardCheck,
+  Cloud, CloudOff, CloudUpload, RefreshCw, Key, Github, Shield
 } from 'lucide-react';
 
 // ===== Storage =====
 const STORE_KEY = 'jobtracker_v1';
+const PROFILE_KEY = 'jobtracker_profile_v1';
+const GIST_CONFIG_KEY = 'jobtracker_gist_v1';
+const GIST_FILE_NAME = 'job_tracker.json';
 
 async function loadStore() {
   try {
@@ -25,6 +31,171 @@ async function saveStore(data) {
     console.error('save failed', e);
   }
 }
+async function loadProfile() {
+  try {
+    const r = localStorage.getItem(PROFILE_KEY);
+    return r ? JSON.parse(r) : null;
+  } catch {
+    return null;
+  }
+}
+async function saveProfile(p) {
+  try {
+    localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+  } catch (e) {
+    console.error('profile save failed', e);
+  }
+}
+async function loadGistConfig() {
+  try {
+    const r = localStorage.getItem(GIST_CONFIG_KEY);
+    return r ? JSON.parse(r) : null;
+  } catch {
+    return null;
+  }
+}
+async function saveGistConfig(c) {
+  try {
+    localStorage.setItem(GIST_CONFIG_KEY, JSON.stringify(c));
+  } catch (e) {
+    console.error('gist config save failed', e);
+  }
+}
+async function clearGistConfig() {
+  try {
+    localStorage.removeItem(GIST_CONFIG_KEY);
+  } catch (e) {
+    console.error('gist config delete failed', e);
+  }
+}
+
+// ===== GitHub Gist API =====
+async function ghCreateGist(pat, payload) {
+  const res = await fetch('https://api.github.com/gists', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${pat}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: JSON.stringify({
+      description: 'Job Application Tracker — synced state',
+      public: false,
+      files: {
+        [GIST_FILE_NAME]: { content: JSON.stringify(payload, null, 2) },
+      },
+    }),
+  });
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${t.slice(0, 200)}`);
+  }
+  return await res.json();
+}
+
+async function ghReadGist(pat, gistId) {
+  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+    headers: {
+      'Authorization': `Bearer ${pat}`,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+  });
+  if (res.status === 401) throw new Error('Invalid PAT (401). Generate a new one with "gist" scope.');
+  if (res.status === 404) throw new Error('Gist not found (404). Check the gist ID, or it may have been deleted.');
+  if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+  const data = await res.json();
+  const file = data.files[GIST_FILE_NAME] || Object.values(data.files)[0];
+  if (!file) throw new Error('Gist has no data file');
+  let parsed = null;
+  try { parsed = JSON.parse(file.content); }
+  catch { throw new Error('Gist file is not valid JSON'); }
+  return { data: parsed, updatedAt: data.updated_at, htmlUrl: data.html_url };
+}
+
+async function ghWriteGist(pat, gistId, payload) {
+  const res = await fetch(`https://api.github.com/gists/${gistId}`, {
+    method: 'PATCH',
+    headers: {
+      'Authorization': `Bearer ${pat}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: JSON.stringify({
+      files: { [GIST_FILE_NAME]: { content: JSON.stringify(payload, null, 2) } },
+    }),
+  });
+  if (res.status === 401) throw new Error('Invalid PAT (401)');
+  if (res.status === 404) throw new Error('Gist not found (404)');
+  if (!res.ok) {
+    const t = await res.text();
+    throw new Error(`GitHub API ${res.status}: ${t.slice(0, 200)}`);
+  }
+  return await res.json();
+}
+
+async function ghValidatePat(pat) {
+  // Check the PAT has gist scope
+  const res = await fetch('https://api.github.com/user', {
+    headers: {
+      'Authorization': `Bearer ${pat}`,
+      'Accept': 'application/vnd.github+json',
+    },
+  });
+  if (res.status === 401) throw new Error('Invalid PAT (401)');
+  if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+  const scopes = (res.headers.get('x-oauth-scopes') || '').split(',').map(s => s.trim());
+  const hasGist = scopes.includes('gist') || res.headers.get('x-oauth-scopes')?.includes('gist');
+  // Fine-grained PATs don't return x-oauth-scopes; we'll let the actual gist call validate them
+  const user = await res.json();
+  return { login: user.login, name: user.name, scopes, hasGist };
+}
+
+// ===== AI Helper =====
+// Local: Vite proxies /anthropic → api.anthropic.com and injects ANTHROPIC_API_KEY from .env.local (never bundled).
+// Production: set VITE_ANTHROPIC_URL to your own HTTPS endpoint that proxies to Anthropic (browser cannot call Anthropic directly — CORS).
+async function callClaude(systemPrompt, userPrompt) {
+  const url = import.meta.env.DEV
+    ? '/anthropic/v1/messages'
+    : import.meta.env.VITE_ANTHROPIC_URL;
+  if (!url) {
+    throw new Error(
+      'Anthropic is not configured. For local dev, add ANTHROPIC_API_KEY to .env.local. For production, set VITE_ANTHROPIC_URL to a server-side proxy.',
+    );
+  }
+  const headers = {
+    'Content-Type': 'application/json',
+    'anthropic-version': '2023-06-01',
+  };
+  const clientKey = import.meta.env.VITE_ANTHROPIC_API_KEY;
+  if (!import.meta.env.DEV && clientKey) {
+    headers['x-api-key'] = clientKey;
+  }
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-20250514',
+        max_tokens: 1000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userPrompt }],
+      }),
+    });
+    if (!res.ok) throw new Error(`API ${res.status}`);
+    const data = await res.json();
+    return (data.content || [])
+      .filter(b => b.type === 'text')
+      .map(b => b.text)
+      .join('\n')
+      .trim();
+  } catch (e) {
+    console.error('AI call failed', e);
+    throw e;
+  }
+}
 
 // ===== Constants =====
 const STATUSES = [
@@ -38,6 +209,51 @@ const STATUSES = [
   { id: 'ghosted',       label: 'Ghosted',           color: '#5a5a5a', dot: '·' },
   { id: 'on_hold',       label: 'On Hold',           color: '#a89888', dot: '◌' },
 ];
+
+// Kanban column groupings — 6 columns covering the 9 statuses.
+const COLUMNS = [
+  { id: 'backlog',    label: 'Backlog',      statuses: ['not_applied'],                   defaultStatus: 'not_applied', accent: '#6b6b6b' },
+  { id: 'outreach',   label: 'Applied',      statuses: ['referral', 'applied'],           defaultStatus: 'applied',     accent: '#7895c1' },
+  { id: 'assessment', label: 'OA / Test',    statuses: ['oa'],                            defaultStatus: 'oa',          accent: '#9b8ec1' },
+  { id: 'interview',  label: 'Interviewing', statuses: ['interview'],                     defaultStatus: 'interview',   accent: '#c19b73' },
+  { id: 'offer',      label: 'Offer',        statuses: ['offer'],                         defaultStatus: 'offer',       accent: '#7eb87e' },
+  { id: 'closed',     label: 'Closed',       statuses: ['rejected', 'ghosted', 'on_hold'],defaultStatus: 'rejected',    accent: '#5a5a5a' },
+];
+
+const statusToColumn = (statusId) => {
+  const c = COLUMNS.find(col => col.statuses.includes(statusId));
+  return c ? c.id : 'backlog';
+};
+
+const ROUND_TYPES = [
+  { id: 'dsa',         label: 'DSA / Coding',     color: '#7895c1' },
+  { id: 'system',      label: 'System Design',    color: '#c19b73' },
+  { id: 'lld',         label: 'LLD / OOP',        color: '#9b8ec1' },
+  { id: 'behavioral',  label: 'Behavioral',       color: '#a89888' },
+  { id: 'hm',          label: 'Hiring Manager',   color: '#d4a574' },
+  { id: 'bar_raiser',  label: 'Bar Raiser',       color: '#7eb87e' },
+  { id: 'recruiter',   label: 'Recruiter Screen', color: '#888' },
+  { id: 'other',       label: 'Other',            color: '#666' },
+];
+
+const ROUND_OUTCOMES = [
+  { id: 'pending',  label: 'Pending',  color: '#a89888' },
+  { id: 'passed',   label: 'Passed',   color: '#7eb87e' },
+  { id: 'failed',   label: 'Failed',   color: '#c87171' },
+  { id: 'unknown',  label: 'Unknown',  color: '#888' },
+];
+
+const DEFAULT_PROFILE = {
+  name: 'Himanshu Dhanwanta',
+  currentRole: 'SDE2',
+  currentCompany: 'Intuit',
+  yearsExp: '2.5',
+  education: 'NIT Trichy, 2023',
+  techStack: 'Java, Spring Boot, microservices, AWS, distributed systems',
+  domain: 'Fintech SaaS (QuickBooks)',
+  achievements: '',
+  resumeBullets: '',
+};
 
 const TIER_LABELS = {
   5: 'Excellent fit',
@@ -826,6 +1042,7 @@ function normalize(seedItem) {
     followUpDate: '',
     notes: '',
     referralAsked: false,
+    rounds: [],
     createdAt: Date.now(),
   };
 }
@@ -870,7 +1087,7 @@ const StatBox = ({ label, value, hint }) => (
 );
 
 // ===== Detail Panel =====
-function DetailPanel({ item, onClose, onSave, onDelete }) {
+function DetailPanel({ item, profile, onClose, onSave, onDelete }) {
   const [draft, setDraft] = useState(item);
   const isNew = !item?.name;
 
@@ -1023,6 +1240,19 @@ function DetailPanel({ item, onClose, onSave, onDelete }) {
               placeholder="Interview prep notes, conversations, gotchas..." />
           </Section>
 
+          {/* Interview Rounds */}
+          <Section title="Interview Rounds">
+            <RoundsSection
+              rounds={draft.rounds || []}
+              onChange={(newRounds) => update({ rounds: newRounds })}
+            />
+          </Section>
+
+          {/* AI Co-pilot */}
+          <Section title="AI Co-pilot">
+            <AICopilotSection item={draft} profile={profile} />
+          </Section>
+
           {/* Links */}
           <Section title="Quick Links">
             <div className="flex flex-wrap gap-2">
@@ -1139,6 +1369,11 @@ function CompanyCard({ item, onOpen, showTrack }) {
                 <Clock size={10} /> follow-up {fmtDate(item.followUpDate)}
               </span>
             )}
+            {item.rounds && item.rounds.length > 0 && (
+              <span className="text-[11px] text-stone-400 font-mono flex items-center gap-1">
+                <ClipboardCheck size={10} /> {item.rounds.length} round{item.rounds.length !== 1 ? 's' : ''}
+              </span>
+            )}
             {(item.tags || []).slice(0, 3).map(t => <Tag key={t}>{t}</Tag>)}
           </div>
         </div>
@@ -1148,11 +1383,988 @@ function CompanyCard({ item, onOpen, showTrack }) {
   );
 }
 
+// ===== Compact Board Card (for Kanban) =====
+function BoardCard({ item, onOpen, onDragStart, onDragEnd, isDragging }) {
+  const s = getStatus(item.status);
+  return (
+    <div
+      draggable
+      onDragStart={(e) => onDragStart(e, item)}
+      onDragEnd={onDragEnd}
+      onClick={() => onOpen(item)}
+      className={`group p-3 mb-2 border bg-stone-950/70 hover:bg-stone-900/80 rounded-sm cursor-pointer transition-all ${
+        isDragging ? 'opacity-30 border-amber-700/60' : 'border-stone-800 hover:border-amber-700/60'
+      }`}
+    >
+      <div className="flex items-start justify-between gap-2 mb-1.5">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-1.5">
+            <span className="text-amber-400/80 font-mono text-[10px]" title={TIER_LABELS[item.tier]}>
+              {'★'.repeat(item.tier)}
+            </span>
+            <h4 className="font-serif text-base text-stone-100 truncate">{item.name}</h4>
+          </div>
+          {item.role && (
+            <div className="text-[11px] text-stone-500 font-mono truncate mt-0.5">{item.role}</div>
+          )}
+        </div>
+        <GripVertical size={12} className="text-stone-700 group-hover:text-stone-500 flex-shrink-0 mt-1" />
+      </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
+        <span
+          className="inline-flex items-center px-1.5 py-0.5 text-[9px] uppercase tracking-wider font-mono rounded-sm"
+          style={{ color: s.color, background: s.color + '18' }}
+        >
+          {s.label}
+        </span>
+        {item.followUpDate && (
+          <span className="text-[9px] text-amber-500/80 font-mono flex items-center gap-0.5">
+            <Clock size={9} /> {fmtDate(item.followUpDate)}
+          </span>
+        )}
+        {item.rounds && item.rounds.length > 0 && (
+          <span className="text-[9px] text-stone-400 font-mono flex items-center gap-0.5">
+            <ClipboardCheck size={9} /> {item.rounds.length}r
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ===== Board (Kanban) View =====
+function BoardView({ items, onOpen, onStatusChange }) {
+  const [draggingId, setDraggingId] = useState(null);
+  const [dragOverCol, setDragOverCol] = useState(null);
+
+  const handleDragStart = (e, item) => {
+    e.dataTransfer.setData('itemId', item.id);
+    e.dataTransfer.effectAllowed = 'move';
+    setDraggingId(item.id);
+  };
+  const handleDragEnd = () => {
+    setDraggingId(null);
+    setDragOverCol(null);
+  };
+  const handleDragOver = (e, colId) => {
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    setDragOverCol(colId);
+  };
+  const handleDragLeave = (e, colId) => {
+    if (dragOverCol === colId) setDragOverCol(null);
+  };
+  const handleDrop = (e, col) => {
+    e.preventDefault();
+    const id = e.dataTransfer.getData('itemId');
+    const item = items.find(i => i.id === id);
+    if (!item) return;
+    // Only change if dropped into a different column
+    if (!col.statuses.includes(item.status)) {
+      onStatusChange(id, col.defaultStatus);
+    }
+    setDraggingId(null);
+    setDragOverCol(null);
+  };
+
+  const byCol = useMemo(() => {
+    const m = {};
+    COLUMNS.forEach(c => { m[c.id] = []; });
+    items.forEach(it => {
+      const cId = statusToColumn(it.status);
+      if (m[cId]) m[cId].push(it);
+    });
+    return m;
+  }, [items]);
+
+  return (
+    <div className="flex gap-3 overflow-x-auto pb-4">
+      {COLUMNS.map(col => {
+        const colItems = byCol[col.id] || [];
+        const isOver = dragOverCol === col.id;
+        return (
+          <div
+            key={col.id}
+            onDragOver={(e) => handleDragOver(e, col.id)}
+            onDragLeave={(e) => handleDragLeave(e, col.id)}
+            onDrop={(e) => handleDrop(e, col)}
+            className={`flex-shrink-0 w-64 rounded-sm transition-colors ${
+              isOver ? 'bg-amber-500/5 ring-1 ring-amber-500/40' : 'bg-stone-900/30'
+            }`}
+            style={{ minHeight: '70vh' }}
+          >
+            <div
+              className="px-3 py-2.5 border-b sticky top-0 bg-stone-950/95 backdrop-blur rounded-t-sm"
+              style={{ borderColor: col.accent + '40' }}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full" style={{ background: col.accent }} />
+                  <span className="font-mono text-[11px] uppercase tracking-wider" style={{ color: col.accent }}>
+                    {col.label}
+                  </span>
+                </div>
+                <span className="font-mono text-[11px] text-stone-500">{colItems.length}</span>
+              </div>
+            </div>
+            <div className="p-2">
+              {colItems.length === 0 ? (
+                <div className="text-[10px] text-stone-600 font-mono text-center py-6 italic">
+                  drop here
+                </div>
+              ) : (
+                colItems.map(it => (
+                  <BoardCard
+                    key={it.id}
+                    item={it}
+                    onOpen={onOpen}
+                    onDragStart={handleDragStart}
+                    onDragEnd={handleDragEnd}
+                    isDragging={draggingId === it.id}
+                  />
+                ))
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// ===== Interview Rounds Section =====
+function RoundsSection({ rounds, onChange }) {
+  const [expanded, setExpanded] = useState(null); // round id
+  const addRound = () => {
+    const newRound = {
+      id: 'r_' + Math.random().toString(36).slice(2, 10),
+      date: todayISO(),
+      type: 'dsa',
+      interviewer: '',
+      interviewerLink: '',
+      questions: '',
+      selfRating: 0,
+      outcome: 'pending',
+      notes: '',
+    };
+    onChange([...(rounds || []), newRound]);
+    setExpanded(newRound.id);
+  };
+  const updateRound = (rid, patch) => {
+    onChange((rounds || []).map(r => r.id === rid ? { ...r, ...patch } : r));
+  };
+  const deleteRound = (rid) => {
+    onChange((rounds || []).filter(r => r.id !== rid));
+  };
+
+  const sorted = [...(rounds || [])].sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+
+  return (
+    <div className="space-y-2">
+      {sorted.length === 0 && (
+        <div className="text-[11px] text-stone-500 italic font-mono py-2">
+          No rounds logged. Add one for each interview as it happens — builds your prep journal.
+        </div>
+      )}
+      {sorted.map((r, idx) => {
+        const rt = ROUND_TYPES.find(t => t.id === r.type) || ROUND_TYPES[0];
+        const oc = ROUND_OUTCOMES.find(o => o.id === r.outcome) || ROUND_OUTCOMES[0];
+        const isOpen = expanded === r.id;
+        return (
+          <div key={r.id} className="border border-stone-800 rounded-sm bg-stone-950/40">
+            <div
+              className="px-3 py-2 cursor-pointer flex items-center justify-between gap-2"
+              onClick={() => setExpanded(isOpen ? null : r.id)}
+            >
+              <div className="flex items-center gap-2.5 min-w-0">
+                <span className="text-[10px] font-mono text-stone-500">R{idx + 1}</span>
+                <span
+                  className="px-1.5 py-0.5 text-[10px] font-mono rounded-sm"
+                  style={{ color: rt.color, background: rt.color + '20' }}
+                >
+                  {rt.label}
+                </span>
+                <span className="text-[11px] text-stone-400 font-mono">{fmtDate(r.date)}</span>
+                {r.interviewer && (
+                  <span className="text-[11px] text-stone-500 truncate">· {r.interviewer}</span>
+                )}
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <span
+                  className="px-1.5 py-0.5 text-[10px] font-mono rounded-sm"
+                  style={{ color: oc.color, background: oc.color + '20' }}
+                >
+                  {oc.label}
+                </span>
+                {isOpen ? <ChevronUp size={14} className="text-stone-500" /> : <ChevronDown size={14} className="text-stone-500" />}
+              </div>
+            </div>
+            {isOpen && (
+              <div className="px-3 pb-3 pt-1 border-t border-stone-800/60 space-y-2.5">
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-[10px] text-stone-500 font-mono mb-1">Date</div>
+                    <input type="date" value={r.date} onChange={e => updateRound(r.id, { date: e.target.value })}
+                      className="input text-xs" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-stone-500 font-mono mb-1">Round type</div>
+                    <select value={r.type} onChange={e => updateRound(r.id, { type: e.target.value })}
+                      className="input text-xs">
+                      {ROUND_TYPES.map(t => <option key={t.id} value={t.id}>{t.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-[10px] text-stone-500 font-mono mb-1">Interviewer</div>
+                    <input value={r.interviewer} onChange={e => updateRound(r.id, { interviewer: e.target.value })}
+                      className="input text-xs" placeholder="Name" />
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-stone-500 font-mono mb-1">LinkedIn</div>
+                    <input value={r.interviewerLink} onChange={e => updateRound(r.id, { interviewerLink: e.target.value })}
+                      className="input text-xs" placeholder="URL" />
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-stone-500 font-mono mb-1">Questions asked</div>
+                  <textarea value={r.questions} onChange={e => updateRound(r.id, { questions: e.target.value })}
+                    className="input text-xs min-h-[60px]" rows={3}
+                    placeholder="e.g. LC #200 variant, design rate limiter, behavioral on conflict..." />
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <div className="text-[10px] text-stone-500 font-mono mb-1">Self-rating</div>
+                    <div className="flex items-center gap-1">
+                      {[1, 2, 3, 4, 5].map(n => (
+                        <button key={n} onClick={() => updateRound(r.id, { selfRating: n })}
+                          className={`text-lg ${n <= (r.selfRating || 0) ? 'text-amber-400' : 'text-stone-700 hover:text-stone-500'}`}>
+                          ★
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-stone-500 font-mono mb-1">Outcome</div>
+                    <select value={r.outcome} onChange={e => updateRound(r.id, { outcome: e.target.value })}
+                      className="input text-xs">
+                      {ROUND_OUTCOMES.map(o => <option key={o.id} value={o.id}>{o.label}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <div>
+                  <div className="text-[10px] text-stone-500 font-mono mb-1">Notes</div>
+                  <textarea value={r.notes} onChange={e => updateRound(r.id, { notes: e.target.value })}
+                    className="input text-xs min-h-[60px]" rows={3}
+                    placeholder="What went well, what tripped you up, what to review for next time..." />
+                </div>
+                <button onClick={() => deleteRound(r.id)}
+                  className="text-rose-400/80 hover:text-rose-300 text-[11px] font-mono flex items-center gap-1">
+                  <Trash2 size={11} /> Delete round
+                </button>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      <button onClick={addRound}
+        className="w-full px-3 py-2 border border-dashed border-stone-700 hover:border-amber-700/60 text-stone-500 hover:text-amber-400 text-xs font-mono rounded-sm flex items-center justify-center gap-1.5">
+        <Plus size={12} /> Add round
+      </button>
+    </div>
+  );
+}
+
+// ===== AI Co-pilot Section =====
+function AICopilotSection({ item, profile }) {
+  const [activeAction, setActiveAction] = useState(null); // 'referral' | 'followup' | 'tailor'
+  const [jdText, setJdText] = useState('');
+  const [contactRole, setContactRole] = useState('engineer at the company');
+  const [loading, setLoading] = useState(false);
+  const [output, setOutput] = useState('');
+  const [error, setError] = useState('');
+  const [copied, setCopied] = useState(false);
+
+  const profileSummary = profile ? `
+Name: ${profile.name || ''}
+Current role: ${profile.currentRole || ''} at ${profile.currentCompany || ''}
+Years of experience: ${profile.yearsExp || ''}
+Education: ${profile.education || ''}
+Tech stack: ${profile.techStack || ''}
+Domain experience: ${profile.domain || ''}
+Notable achievements: ${profile.achievements || '(not provided)'}
+`.trim() : '';
+
+  const runReferral = async () => {
+    setLoading(true); setError(''); setOutput('');
+    try {
+      const sys = `You are helping a software engineer write personalized LinkedIn outreach messages to request a referral. Rules:
+- Keep messages under 130 words.
+- Open with a specific, genuine reason for reaching out (something about the company's product, recent news, or the recipient's work).
+- Concisely state who the sender is (current role + 1 relevant credibility marker).
+- State the specific role they're applying for.
+- End with a clear, low-friction ask (referral, intro, or short chat).
+- Tone: warm, professional, confident — never desperate or generic.
+- Do NOT include subject line, signature, or [placeholders]. Use the actual names provided.
+- Output ONLY the message body, ready to send.`;
+      const user = `Draft a LinkedIn message to ${item.contactName || 'an ' + contactRole} at ${item.name} requesting a referral for the "${item.role || 'SDE2'}" role.
+
+About the company / fit:
+${item.fitNote || `${item.name} — ${item.domain || ''}`}
+
+About the sender:
+${profileSummary}`;
+      const text = await callClaude(sys, user);
+      setOutput(text);
+    } catch (e) {
+      setError('AI request failed. Check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runFollowUp = async () => {
+    setLoading(true); setError(''); setOutput('');
+    try {
+      const days = item.appliedDate
+        ? Math.max(0, Math.floor((Date.now() - new Date(item.appliedDate + 'T00:00:00').getTime()) / (1000 * 60 * 60 * 24)))
+        : 'unknown';
+      const sys = `You write brief, professional follow-up messages for job applications. Rules:
+- Under 90 words.
+- Confident, not desperate. Reaffirm interest concisely.
+- Mention one specific thing about why the role/company excites the sender.
+- End with a low-friction ask (update, brief chat, or simply "happy to provide more info").
+- No subject line, no signature placeholders.
+- Output ONLY the message body.`;
+      const user = `Draft a follow-up message to ${item.contactName || 'the recruiter'} at ${item.name} about my application for "${item.role || 'SDE2'}".
+Application status: ${getStatus(item.status).label}.
+Days since applied: ${days}.
+Why this company is interesting: ${item.fitNote || item.domain || 'their engineering culture and product'}
+
+About the sender:
+${profileSummary}`;
+      const text = await callClaude(sys, user);
+      setOutput(text);
+    } catch (e) {
+      setError('AI request failed. Check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const runTailor = async () => {
+    if (!jdText.trim()) { setError('Paste the job description first.'); return; }
+    setLoading(true); setError(''); setOutput('');
+    try {
+      const sys = `You help software engineers tailor resume bullets to a specific job description. Rules:
+- Output 4-6 bullets, each on its own line, prefixed with "• ".
+- Each bullet ≤ 25 words, action-verb start, quantified where the sender's experience supports it.
+- Match keywords from the JD where authentic — never fabricate experience.
+- Emphasize the dimensions of the sender's experience most relevant to THIS JD (e.g. distributed systems if JD asks for that; SaaS scale if JD emphasizes that).
+- Mark any bullet where you had to guess specifics with [verify] at the end so the sender can confirm.
+- Output ONLY the bullets. No commentary, no intro, no closing.`;
+      const user = `Target role: ${item.role || 'SDE2'} at ${item.name} (${item.domain || ''})
+
+Job description:
+${jdText}
+
+Sender's background:
+${profileSummary}
+
+Sender's existing resume bullets / achievements (if any):
+${profile.resumeBullets || '(none provided — generate from background above and mark with [verify])'}`;
+      const text = await callClaude(sys, user);
+      setOutput(text);
+    } catch (e) {
+      setError('AI request failed. Check your connection and try again.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(output);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
+  };
+
+  const handleActionClick = (action) => {
+    if (activeAction === action) {
+      setActiveAction(null);
+      setOutput(''); setError('');
+    } else {
+      setActiveAction(action);
+      setOutput(''); setError('');
+    }
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="text-[11px] text-stone-500 font-mono mb-2 leading-relaxed">
+        Generates personalized drafts using your profile. Edit your profile in the header to improve outputs.
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <button onClick={() => handleActionClick('referral')}
+          className={`flex flex-col items-center gap-1 px-2 py-3 border rounded-sm transition-all ${
+            activeAction === 'referral'
+              ? 'border-amber-500 bg-amber-500/10 text-amber-300'
+              : 'border-stone-700 text-stone-400 hover:border-stone-600'
+          }`}>
+          <Users size={16} />
+          <span className="text-[10px] font-mono">Referral request</span>
+        </button>
+        <button onClick={() => handleActionClick('followup')}
+          className={`flex flex-col items-center gap-1 px-2 py-3 border rounded-sm transition-all ${
+            activeAction === 'followup'
+              ? 'border-amber-500 bg-amber-500/10 text-amber-300'
+              : 'border-stone-700 text-stone-400 hover:border-stone-600'
+          }`}>
+          <Mail size={16} />
+          <span className="text-[10px] font-mono">Follow-up</span>
+        </button>
+        <button onClick={() => handleActionClick('tailor')}
+          className={`flex flex-col items-center gap-1 px-2 py-3 border rounded-sm transition-all ${
+            activeAction === 'tailor'
+              ? 'border-amber-500 bg-amber-500/10 text-amber-300'
+              : 'border-stone-700 text-stone-400 hover:border-stone-600'
+          }`}>
+          <FileEdit size={16} />
+          <span className="text-[10px] font-mono">Tailor resume</span>
+        </button>
+      </div>
+
+      {activeAction && (
+        <div className="border border-stone-800 bg-stone-950/60 rounded-sm p-3 space-y-2.5">
+          {activeAction === 'referral' && (
+            <>
+              <div className="text-[11px] text-stone-400 font-mono">
+                Draft a referral request to{' '}
+                <span className="text-stone-200">{item.contactName || 'an employee'}</span>{' '}
+                at <span className="text-amber-400">{item.name}</span>.
+              </div>
+              {!item.contactName && (
+                <input value={contactRole} onChange={e => setContactRole(e.target.value)}
+                  className="input text-xs" placeholder="Who? e.g. engineering manager, senior SDE" />
+              )}
+              <button onClick={runReferral} disabled={loading}
+                className="w-full px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-stone-950 text-xs font-medium rounded-sm flex items-center justify-center gap-1.5">
+                {loading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {loading ? 'Generating...' : 'Generate'}
+              </button>
+            </>
+          )}
+
+          {activeAction === 'followup' && (
+            <>
+              <div className="text-[11px] text-stone-400 font-mono">
+                Follow-up for <span className="text-amber-400">{item.name}</span>
+                {item.appliedDate && <> · applied {fmtDate(item.appliedDate)}</>}
+              </div>
+              <button onClick={runFollowUp} disabled={loading}
+                className="w-full px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 text-stone-950 text-xs font-medium rounded-sm flex items-center justify-center gap-1.5">
+                {loading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {loading ? 'Generating...' : 'Generate'}
+              </button>
+            </>
+          )}
+
+          {activeAction === 'tailor' && (
+            <>
+              <div className="text-[11px] text-stone-400 font-mono">
+                Paste the job description below; AI generates tailored bullets.
+              </div>
+              <textarea value={jdText} onChange={e => setJdText(e.target.value)}
+                className="input text-xs min-h-[100px] font-mono" rows={5}
+                placeholder="Paste full JD here..." />
+              <button onClick={runTailor} disabled={loading || !jdText.trim()}
+                className="w-full px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-50 disabled:cursor-not-allowed text-stone-950 text-xs font-medium rounded-sm flex items-center justify-center gap-1.5">
+                {loading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+                {loading ? 'Generating...' : 'Generate tailored bullets'}
+              </button>
+            </>
+          )}
+
+          {error && (
+            <div className="text-[11px] text-rose-400 font-mono flex items-center gap-1.5">
+              <AlertCircle size={11} /> {error}
+            </div>
+          )}
+
+          {output && (
+            <div className="border-t border-stone-800 pt-2.5 mt-2.5">
+              <div className="flex items-center justify-between mb-1.5">
+                <span className="text-[10px] text-stone-500 font-mono uppercase tracking-wider">Draft</span>
+                <button onClick={handleCopy}
+                  className="text-[10px] text-stone-400 hover:text-amber-400 font-mono flex items-center gap-1">
+                  <Copy size={11} /> {copied ? 'Copied!' : 'Copy'}
+                </button>
+              </div>
+              <div className="text-xs text-stone-200 whitespace-pre-wrap font-sans leading-relaxed bg-stone-900/60 p-2.5 rounded-sm border border-stone-800/60">
+                {output}
+              </div>
+              <div className="text-[10px] text-stone-600 font-mono mt-1.5 italic">
+                AI-generated. Always review and edit before sending.
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ===== Sync Indicator (header pill) =====
+function SyncIndicator({ state, onClick }) {
+  const variants = {
+    not_configured: {
+      icon: <CloudOff size={12} />,
+      label: 'Sync off',
+      hover: 'Set up cross-device sync',
+      color: 'text-stone-500 hover:text-stone-300 border-stone-800 hover:border-stone-600',
+    },
+    idle: {
+      icon: <Cloud size={12} />,
+      label: 'Idle',
+      hover: 'Sync',
+      color: 'text-stone-400 hover:text-stone-200 border-stone-800',
+    },
+    syncing: {
+      icon: <Loader2 size={12} className="animate-spin" />,
+      label: 'Syncing…',
+      hover: 'Syncing to GitHub gist',
+      color: 'text-sky-400 border-sky-700/40',
+    },
+    synced: {
+      icon: <CheckCircle2 size={12} />,
+      label: 'Synced',
+      hover: state.lastSync ? `Last synced ${new Date(state.lastSync).toLocaleTimeString()}` : 'Synced',
+      color: 'text-emerald-400 hover:text-emerald-300 border-emerald-700/40 hover:border-emerald-600/60',
+    },
+    error: {
+      icon: <AlertCircle size={12} />,
+      label: 'Sync error',
+      hover: state.error || 'Sync error — click for details',
+      color: 'text-rose-400 hover:text-rose-300 border-rose-700/40',
+    },
+  };
+  const v = variants[state.status] || variants.idle;
+  return (
+    <button onClick={onClick} title={v.hover}
+      className={`px-2 py-1.5 border rounded-sm text-[10px] font-mono flex items-center gap-1.5 transition-colors ${v.color}`}>
+      {v.icon}
+      <span>{v.label}</span>
+    </button>
+  );
+}
+
+// ===== Sync Setup Modal =====
+function SyncSetup({ config, currentItems, currentProfile, onClose, onConfigured, onDisconnect }) {
+  const isConnected = !!(config?.pat && config?.gistId);
+  const [step, setStep] = useState(isConnected ? 'connected' : 'pat');
+  const [pat, setPat] = useState(config?.pat || '');
+  const [gistId, setGistId] = useState(config?.gistId || '');
+  const [mode, setMode] = useState('create'); // 'create' | 'existing'
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const [info, setInfo] = useState('');
+  const [user, setUser] = useState(null);
+  const [existingGistData, setExistingGistData] = useState(null);
+  const [showPat, setShowPat] = useState(false);
+
+  const verifyPat = async () => {
+    setBusy(true); setError('');
+    try {
+      const u = await ghValidatePat(pat);
+      setUser(u);
+      setStep('choose');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleCreate = async () => {
+    setBusy(true); setError('');
+    try {
+      const payload = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        items: currentItems || [],
+        profile: currentProfile || null,
+      };
+      const gist = await ghCreateGist(pat, payload);
+      const newConfig = {
+        pat,
+        gistId: gist.id,
+        gistUrl: gist.html_url,
+        login: user?.login,
+        connectedAt: new Date().toISOString(),
+      };
+      await onConfigured(newConfig, { items: currentItems, profile: currentProfile });
+      setStep('connected');
+      setInfo(`Connected! Created new gist with ${currentItems?.length || 0} companies.`);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleConnectExisting = async () => {
+    if (!gistId.trim()) { setError('Enter a gist ID first'); return; }
+    setBusy(true); setError('');
+    try {
+      const { data, htmlUrl } = await ghReadGist(pat, gistId.trim());
+      // Show user what's in the gist and let them choose
+      setExistingGistData({ data, htmlUrl, gistId: gistId.trim() });
+      setStep('resolve');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolvePull = async () => {
+    setBusy(true); setError('');
+    try {
+      const newConfig = {
+        pat,
+        gistId: existingGistData.gistId,
+        gistUrl: existingGistData.htmlUrl,
+        login: user?.login,
+        connectedAt: new Date().toISOString(),
+      };
+      await onConfigured(newConfig, existingGistData.data);
+      setStep('connected');
+      setInfo('Connected! Pulled data from gist into this device.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const resolvePush = async () => {
+    setBusy(true); setError('');
+    try {
+      const payload = {
+        version: 1,
+        savedAt: new Date().toISOString(),
+        items: currentItems || [],
+        profile: currentProfile || null,
+      };
+      await ghWriteGist(pat, existingGistData.gistId, payload);
+      const newConfig = {
+        pat,
+        gistId: existingGistData.gistId,
+        gistUrl: existingGistData.htmlUrl,
+        login: user?.login,
+        connectedAt: new Date().toISOString(),
+      };
+      await onConfigured(newConfig, { items: currentItems, profile: currentProfile });
+      setStep('connected');
+      setInfo('Connected! Overwrote gist with local data.');
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (!confirm('Disconnect sync? Your data stays locally on this device. You can reconnect anytime.')) return;
+    await onDisconnect();
+    onClose();
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex">
+      <div className="flex-1 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="w-full max-w-xl bg-stone-950 border-l border-stone-800 overflow-y-auto">
+        <div className="sticky top-0 z-10 bg-stone-950/95 backdrop-blur border-b border-stone-800 px-6 py-4 flex items-center justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-amber-500/80 font-mono flex items-center gap-1.5">
+              <Github size={11} /> GitHub Gist Sync
+            </div>
+            <h2 className="font-serif text-2xl text-stone-100 mt-0.5">Cross-device sync</h2>
+            <p className="text-[11px] text-stone-500 font-mono mt-0.5">
+              Sync your tracker data to a private GitHub Gist. Free, versioned, yours.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-stone-900 rounded text-stone-400 hover:text-stone-100">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-4">
+          {/* Connected view */}
+          {step === 'connected' && (
+            <>
+              <div className="border border-emerald-700/40 bg-emerald-900/15 rounded-sm p-4">
+                <div className="flex items-center gap-2 mb-2">
+                  <CheckCircle2 className="text-emerald-400" size={16} />
+                  <span className="font-mono text-sm text-emerald-300">Connected</span>
+                </div>
+                {info && <p className="text-[11px] text-emerald-200/80 font-mono mb-2">{info}</p>}
+                <div className="text-xs text-stone-300 space-y-1 font-mono">
+                  {config?.login && <div>Account: <span className="text-stone-100">{config.login}</span></div>}
+                  <div>Gist ID: <span className="text-stone-100 break-all">{config?.gistId}</span></div>
+                  {config?.connectedAt && (
+                    <div>Connected: <span className="text-stone-100">{fmtDate(config.connectedAt.slice(0, 10))}</span></div>
+                  )}
+                </div>
+                {config?.gistUrl && (
+                  <a href={config.gistUrl} target="_blank" rel="noreferrer"
+                    className="mt-3 inline-flex items-center gap-1 text-[11px] text-emerald-400 hover:text-emerald-300 font-mono">
+                    <ExternalLink size={11} /> View gist on GitHub
+                  </a>
+                )}
+              </div>
+              <div className="text-[11px] text-stone-500 font-mono leading-relaxed">
+                Every change you make on any device pushes to this gist after ~2 seconds. When you open the app, the latest data is pulled. GitHub keeps revision history automatically — every save is a recoverable version.
+              </div>
+              <button onClick={handleDisconnect}
+                className="w-full px-3 py-2 border border-rose-700/40 text-rose-400 hover:bg-rose-900/15 text-xs font-mono rounded-sm flex items-center justify-center gap-1.5">
+                <CloudOff size={12} /> Disconnect sync
+              </button>
+            </>
+          )}
+
+          {/* Step 1: PAT entry */}
+          {step === 'pat' && (
+            <>
+              <div className="space-y-3">
+                <div className="border border-amber-700/30 bg-amber-900/10 rounded-sm p-3">
+                  <div className="text-[11px] text-amber-300 font-mono font-medium mb-2 flex items-center gap-1.5">
+                    <Key size={11} /> Step 1 — Create a Personal Access Token
+                  </div>
+                  <ol className="text-[11px] text-stone-300 space-y-1 font-mono pl-4 list-decimal">
+                    <li>Go to <a href="https://github.com/settings/tokens/new?scopes=gist&description=Job%20Tracker%20Sync" target="_blank" rel="noreferrer" className="text-amber-400 underline">github.com/settings/tokens/new <ExternalLink size={9} className="inline" /></a> (pre-filled with gist scope)</li>
+                    <li>Set expiration to "No expiration" (or 1 year)</li>
+                    <li>Confirm only "gist" scope is checked</li>
+                    <li>Click "Generate token", copy it, paste below</li>
+                  </ol>
+                </div>
+                <Field label="Personal Access Token">
+                  <div className="relative">
+                    <input
+                      type={showPat ? 'text' : 'password'}
+                      value={pat}
+                      onChange={e => setPat(e.target.value)}
+                      placeholder="ghp_..."
+                      className="input pr-10 font-mono text-xs"
+                      autoFocus
+                    />
+                    <button onClick={() => setShowPat(!showPat)}
+                      className="absolute right-2 top-1/2 -translate-y-1/2 text-stone-500 hover:text-stone-300">
+                      <Eye size={14} />
+                    </button>
+                  </div>
+                </Field>
+                <div className="text-[10px] text-stone-500 font-mono leading-relaxed flex gap-1.5">
+                  <Shield size={11} className="flex-shrink-0 mt-0.5" />
+                  <span>PAT is stored locally on this device only (never written to the gist itself). Only has "gist" scope — can't touch your other GitHub data.</span>
+                </div>
+                <button onClick={verifyPat} disabled={!pat.trim() || busy}
+                  className="w-full px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-stone-950 text-sm font-medium rounded-sm flex items-center justify-center gap-1.5">
+                  {busy ? <Loader2 size={13} className="animate-spin" /> : <ChevronRight size={13} />}
+                  Verify token
+                </button>
+              </div>
+            </>
+          )}
+
+          {/* Step 2: Choose create or existing */}
+          {step === 'choose' && (
+            <>
+              <div className="border border-emerald-700/30 bg-emerald-900/10 rounded-sm p-3 text-[11px] font-mono">
+                <div className="flex items-center gap-1.5 text-emerald-300">
+                  <CheckCircle2 size={12} /> Token verified as <span className="text-emerald-200 font-medium">{user?.login}</span>
+                </div>
+              </div>
+              <div className="text-[11px] text-stone-400 font-mono">Step 2 — Choose what to do:</div>
+              <div className="space-y-2">
+                <button onClick={() => setMode('create')}
+                  className={`w-full text-left p-3 border rounded-sm transition-all ${
+                    mode === 'create' ? 'border-amber-500 bg-amber-500/10' : 'border-stone-700 hover:border-stone-600'
+                  }`}>
+                  <div className="font-mono text-sm text-stone-100 flex items-center gap-1.5">
+                    <CloudUpload size={13} /> Create new gist
+                  </div>
+                  <div className="text-[11px] text-stone-500 mt-1 font-mono">
+                    Recommended for first-time setup. Creates a private gist with your current {currentItems?.length || 0} companies.
+                  </div>
+                </button>
+                <button onClick={() => setMode('existing')}
+                  className={`w-full text-left p-3 border rounded-sm transition-all ${
+                    mode === 'existing' ? 'border-amber-500 bg-amber-500/10' : 'border-stone-700 hover:border-stone-600'
+                  }`}>
+                  <div className="font-mono text-sm text-stone-100 flex items-center gap-1.5">
+                    <Cloud size={13} /> Use existing gist
+                  </div>
+                  <div className="text-[11px] text-stone-500 mt-1 font-mono">
+                    For connecting a second device. Paste the gist ID from your first device's Sync screen.
+                  </div>
+                </button>
+              </div>
+
+              {mode === 'existing' && (
+                <Field label="Gist ID">
+                  <input value={gistId} onChange={e => setGistId(e.target.value)}
+                    className="input text-xs font-mono"
+                    placeholder="e.g. a1b2c3d4e5f6..." />
+                </Field>
+              )}
+
+              <button
+                onClick={mode === 'create' ? handleCreate : handleConnectExisting}
+                disabled={busy || (mode === 'existing' && !gistId.trim())}
+                className="w-full px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-stone-950 text-sm font-medium rounded-sm flex items-center justify-center gap-1.5">
+                {busy ? <Loader2 size={13} className="animate-spin" /> : <ChevronRight size={13} />}
+                {mode === 'create' ? 'Create and connect' : 'Verify gist'}
+              </button>
+              <button onClick={() => setStep('pat')} className="text-[11px] text-stone-500 hover:text-stone-300 font-mono">
+                ← Back
+              </button>
+            </>
+          )}
+
+          {/* Step 3: Resolve conflict for existing gist */}
+          {step === 'resolve' && existingGistData && (
+            <>
+              <div className="border border-amber-700/30 bg-amber-900/10 rounded-sm p-3 text-[11px] font-mono space-y-1">
+                <div className="text-amber-300 font-medium">Gist found. Pick which data wins:</div>
+                <div className="grid grid-cols-2 gap-3 mt-2">
+                  <div className="text-stone-400">
+                    <div className="text-stone-500 text-[10px] uppercase tracking-wider mb-0.5">In the gist</div>
+                    <div className="text-stone-100">{existingGistData.data?.items?.length || 0} companies</div>
+                    {existingGistData.data?.savedAt && (
+                      <div className="text-[10px] text-stone-500 mt-0.5">saved {fmtDate(existingGistData.data.savedAt.slice(0, 10))}</div>
+                    )}
+                  </div>
+                  <div className="text-stone-400">
+                    <div className="text-stone-500 text-[10px] uppercase tracking-wider mb-0.5">On this device</div>
+                    <div className="text-stone-100">{currentItems?.length || 0} companies</div>
+                  </div>
+                </div>
+              </div>
+              <button onClick={resolvePull} disabled={busy}
+                className="w-full px-3 py-2 bg-amber-500 hover:bg-amber-400 disabled:opacity-40 text-stone-950 text-sm font-medium rounded-sm flex items-center justify-center gap-1.5">
+                <Download size={13} /> Pull gist data here (overwrites local)
+              </button>
+              <button onClick={resolvePush} disabled={busy}
+                className="w-full px-3 py-2 border border-stone-700 hover:border-stone-500 text-stone-300 text-sm font-mono rounded-sm flex items-center justify-center gap-1.5">
+                <Upload size={13} /> Push local data to gist (overwrites gist)
+              </button>
+              <button onClick={() => setStep('choose')} className="text-[11px] text-stone-500 hover:text-stone-300 font-mono">
+                ← Back
+              </button>
+            </>
+          )}
+
+          {error && (
+            <div className="border border-rose-700/40 bg-rose-900/15 rounded-sm p-2.5 text-[11px] text-rose-300 font-mono flex items-start gap-1.5">
+              <AlertCircle size={12} className="flex-shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ===== Profile Editor =====
+function ProfileEditor({ profile, onClose, onSave }) {
+  const [draft, setDraft] = useState(profile);
+  useEffect(() => { setDraft(profile); }, [profile]);
+  if (!draft) return null;
+  const update = (patch) => setDraft(d => ({ ...d, ...patch }));
+
+  return (
+    <div className="fixed inset-0 z-50 flex">
+      <div className="flex-1 bg-black/70 backdrop-blur-sm" onClick={onClose} />
+      <div className="w-full max-w-xl bg-stone-950 border-l border-stone-800 overflow-y-auto">
+        <div className="sticky top-0 z-10 bg-stone-950/95 backdrop-blur border-b border-stone-800 px-6 py-4 flex items-center justify-between">
+          <div>
+            <div className="text-[10px] uppercase tracking-[0.2em] text-amber-500/80 font-mono">Profile</div>
+            <h2 className="font-serif text-2xl text-stone-100 mt-0.5">Your profile</h2>
+            <p className="text-[11px] text-stone-500 font-mono mt-0.5">
+              Used by AI Co-pilot to personalize drafts. Stays on your device.
+            </p>
+          </div>
+          <button onClick={onClose} className="p-2 hover:bg-stone-900 rounded text-stone-400 hover:text-stone-100">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="p-6 space-y-3">
+          <Field label="Full name">
+            <input value={draft.name} onChange={e => update({ name: e.target.value })} className="input" />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Current role">
+              <input value={draft.currentRole} onChange={e => update({ currentRole: e.target.value })} className="input" placeholder="SDE2" />
+            </Field>
+            <Field label="Current company">
+              <input value={draft.currentCompany} onChange={e => update({ currentCompany: e.target.value })} className="input" placeholder="Intuit" />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Years of experience">
+              <input value={draft.yearsExp} onChange={e => update({ yearsExp: e.target.value })} className="input" placeholder="2.5" />
+            </Field>
+            <Field label="Education">
+              <input value={draft.education} onChange={e => update({ education: e.target.value })} className="input" placeholder="NIT Trichy, 2023" />
+            </Field>
+          </div>
+          <Field label="Tech stack">
+            <input value={draft.techStack} onChange={e => update({ techStack: e.target.value })} className="input"
+              placeholder="Java, Spring Boot, distributed systems..." />
+          </Field>
+          <Field label="Domain experience">
+            <input value={draft.domain} onChange={e => update({ domain: e.target.value })} className="input"
+              placeholder="Fintech SaaS, QuickBooks platform..." />
+          </Field>
+          <Field label="Notable achievements (for AI context)">
+            <textarea value={draft.achievements} onChange={e => update({ achievements: e.target.value })}
+              className="input min-h-[80px]" rows={4}
+              placeholder="e.g. Led migration of X service from monolith to microservices, reducing p99 latency by 40%..." />
+          </Field>
+          <Field label="Resume bullets (raw — for tailoring)">
+            <textarea value={draft.resumeBullets} onChange={e => update({ resumeBullets: e.target.value })}
+              className="input min-h-[150px] font-mono text-xs" rows={8}
+              placeholder="Paste your existing resume bullets here. AI uses these as the source material when tailoring to specific JDs." />
+          </Field>
+        </div>
+
+        <div className="sticky bottom-0 bg-stone-950/95 backdrop-blur border-t border-stone-800 px-6 py-3 flex justify-end gap-2">
+          <button onClick={onClose} className="px-4 py-2 text-sm text-stone-400 hover:text-stone-200">Cancel</button>
+          <button onClick={() => { onSave(draft); onClose(); }}
+            className="px-4 py-2 text-sm bg-amber-500 hover:bg-amber-400 text-stone-950 font-medium rounded-sm flex items-center gap-1.5">
+            <Save size={14} /> Save profile
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ===== Main App =====
 export default function App() {
   const [items, setItems] = useState(null);
   const [editing, setEditing] = useState(null);
   const [trackTab, setTrackTab] = useState('primary');
+  const [viewMode, setViewMode] = useState('list'); // 'list' | 'board'
+  const [profile, setProfile] = useState(null);
+  const [profileOpen, setProfileOpen] = useState(false);
+  const [gistConfig, setGistConfig] = useState(null);
+  const [syncOpen, setSyncOpen] = useState(false);
+  const [syncState, setSyncState] = useState({ status: 'idle', lastSync: null, error: null });
+  // 'idle' | 'syncing' | 'synced' | 'error' | 'not_configured'
   const [search, setSearch] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterTier, setFilterTier] = useState('all');
@@ -1160,15 +2372,26 @@ export default function App() {
   const [saving, setSaving] = useState(false);
   const fileRef = useRef(null);
 
-  // Init
+  // Init — load local cache first (instant render), then pull from gist if configured
   useEffect(() => {
     (async () => {
       const stored = await loadStore();
+      const storedProfile = await loadProfile();
+      const cfg = await loadGistConfig();
+      setGistConfig(cfg);
+
+      // Build initial state from local cache
+      let initialItems = null;
+      let initialProfile = storedProfile || DEFAULT_PROFILE;
+
       if (stored && Array.isArray(stored.items)) {
-        let migrated = stored.items.map(i => ({ ...i, track: i.track || 'primary' }));
+        let migrated = stored.items.map(i => ({
+          ...i,
+          track: i.track || 'primary',
+          rounds: Array.isArray(i.rounds) ? i.rounds : [],
+        }));
         const existingNames = new Set(migrated.map(i => i.name.toLowerCase()));
 
-        // One-time migration: add Secondary seed companies if not yet done
         if (!stored.secondaryAdded) {
           const newSecondary = SEED
             .filter(s => s.track === 'secondary' && !existingNames.has(s.name.toLowerCase()))
@@ -1177,7 +2400,6 @@ export default function App() {
           newSecondary.forEach(s => existingNames.add(s.name.toLowerCase()));
         }
 
-        // One-time migration: add Startup seed companies if not yet done
         if (!stored.startupsAdded) {
           const newStartups = SEED
             .filter(s => s.track === 'startup' && !existingNames.has(s.name.toLowerCase()))
@@ -1185,11 +2407,41 @@ export default function App() {
           migrated = [...migrated, ...newStartups];
         }
 
-        setItems(migrated);
+        initialItems = migrated;
       } else {
-        const seeded = SEED.map(normalize);
-        setItems(seeded);
-        await saveStore({ items: seeded, secondaryAdded: true, startupsAdded: true });
+        initialItems = SEED.map(normalize);
+        await saveStore({ items: initialItems, secondaryAdded: true, startupsAdded: true });
+      }
+
+      // Set initial state from cache so UI renders immediately
+      setItems(initialItems);
+      setProfile(initialProfile);
+
+      // If gist is configured, pull fresh data and override
+      if (cfg?.pat && cfg?.gistId) {
+        setSyncState({ status: 'syncing', lastSync: null, error: null });
+        try {
+          const { data } = await ghReadGist(cfg.pat, cfg.gistId);
+          if (data?.items && Array.isArray(data.items)) {
+            const refreshed = data.items.map(i => ({
+              ...i,
+              track: i.track || 'primary',
+              rounds: Array.isArray(i.rounds) ? i.rounds : [],
+            }));
+            setItems(refreshed);
+            await saveStore({ items: refreshed, secondaryAdded: true, startupsAdded: true });
+          }
+          if (data?.profile) {
+            setProfile(data.profile);
+            await saveProfile(data.profile);
+          }
+          setSyncState({ status: 'synced', lastSync: new Date().toISOString(), error: null });
+        } catch (e) {
+          console.error('initial sync failed', e);
+          setSyncState({ status: 'error', lastSync: null, error: e.message });
+        }
+      } else {
+        setSyncState({ status: 'not_configured', lastSync: null, error: null });
       }
     })();
   }, []);
@@ -1203,6 +2455,77 @@ export default function App() {
       setTimeout(() => setSaving(false), 400);
     })();
   }, [items]);
+
+  // Persist profile
+  useEffect(() => {
+    if (profile === null) return;
+    saveProfile(profile);
+  }, [profile]);
+
+  // Debounced gist push (~2s after last change)
+  useEffect(() => {
+    if (items === null || profile === null) return;
+    if (!gistConfig?.pat || !gistConfig?.gistId) return;
+    const t = setTimeout(async () => {
+      setSyncState(s => ({ ...s, status: 'syncing', error: null }));
+      try {
+        await ghWriteGist(gistConfig.pat, gistConfig.gistId, {
+          version: 1,
+          savedAt: new Date().toISOString(),
+          items,
+          profile,
+        });
+        setSyncState({ status: 'synced', lastSync: new Date().toISOString(), error: null });
+      } catch (e) {
+        console.error('gist push failed', e);
+        setSyncState(s => ({ status: 'error', lastSync: s.lastSync, error: e.message }));
+      }
+    }, 2500);
+    return () => clearTimeout(t);
+  }, [items, profile, gistConfig]);
+
+  // Manual sync trigger
+  const handleManualSync = async () => {
+    if (!gistConfig?.pat || !gistConfig?.gistId) return;
+    setSyncState(s => ({ ...s, status: 'syncing', error: null }));
+    try {
+      const { data } = await ghReadGist(gistConfig.pat, gistConfig.gistId);
+      if (data?.items && Array.isArray(data.items)) {
+        const refreshed = data.items.map(i => ({
+          ...i,
+          track: i.track || 'primary',
+          rounds: Array.isArray(i.rounds) ? i.rounds : [],
+        }));
+        setItems(refreshed);
+      }
+      if (data?.profile) setProfile(data.profile);
+      setSyncState({ status: 'synced', lastSync: new Date().toISOString(), error: null });
+    } catch (e) {
+      setSyncState(s => ({ status: 'error', lastSync: s.lastSync, error: e.message }));
+    }
+  };
+
+  // Sync setup handlers
+  const handleSyncConfigured = async (newConfig, initialData) => {
+    await saveGistConfig(newConfig);
+    setGistConfig(newConfig);
+    if (initialData?.items) {
+      const refreshed = initialData.items.map(i => ({
+        ...i,
+        track: i.track || 'primary',
+        rounds: Array.isArray(i.rounds) ? i.rounds : [],
+      }));
+      setItems(refreshed);
+    }
+    if (initialData?.profile) setProfile(initialData.profile);
+    setSyncState({ status: 'synced', lastSync: new Date().toISOString(), error: null });
+  };
+
+  const handleSyncDisconnect = async () => {
+    await clearGistConfig();
+    setGistConfig(null);
+    setSyncState({ status: 'not_configured', lastSync: null, error: null });
+  };
 
   const stats = useMemo(() => {
     if (!items) return null;
@@ -1263,12 +2586,12 @@ export default function App() {
   const openNew = () => {
     setEditing({
       id: newId(), name: '', tier: 3,
-      track: trackTab === 'all' ? 'primary' : trackTab,
+      track: trackTab === 'all' ? 'primary' : (trackTab === 'startup' ? 'startup' : trackTab),
       locations: [], role: '', domain: '',
       fitNote: '', careersUrl: '', compLink: '', tags: [],
       status: 'not_applied', jobLink: '', resumeVersion: '',
       contactName: '', contactInfo: '', appliedDate: '', followUpDate: '',
-      notes: '', referralAsked: false, createdAt: Date.now(),
+      notes: '', referralAsked: false, rounds: [], createdAt: Date.now(),
     });
   };
 
@@ -1366,9 +2689,14 @@ export default function App() {
                 </p>
               </div>
               <div className="flex items-center gap-2">
+                <SyncIndicator state={syncState} onClick={() => setSyncOpen(true)} />
                 <span className={`text-[10px] font-mono text-stone-500 transition-opacity ${saving ? 'opacity-100' : 'opacity-0'}`}>
-                  saving…
+                  cached
                 </span>
+                <button onClick={() => setProfileOpen(true)} title="Edit profile (for AI Co-pilot)"
+                  className="p-2 border border-stone-800 hover:border-amber-700/60 text-stone-400 hover:text-amber-400 rounded-sm">
+                  <User size={14} />
+                </button>
                 <button onClick={exportJson} title="Export"
                   className="p-2 border border-stone-800 hover:border-amber-700/60 text-stone-400 hover:text-amber-400 rounded-sm">
                   <Download size={14} />
@@ -1473,19 +2801,51 @@ export default function App() {
             <option value="applied">Sort: Recently applied</option>
           </select>
 
+          {/* View mode toggle */}
+          <div className="inline-flex border border-stone-800 rounded-sm overflow-hidden">
+            <button onClick={() => setViewMode('list')}
+              className={`px-2.5 py-2 text-xs font-mono flex items-center gap-1.5 transition-colors ${
+                viewMode === 'list' ? 'bg-amber-500/15 text-amber-400' : 'text-stone-500 hover:text-stone-300'
+              }`}>
+              <ListIcon size={13} /> List
+            </button>
+            <button onClick={() => setViewMode('board')}
+              className={`px-2.5 py-2 text-xs font-mono flex items-center gap-1.5 transition-colors border-l border-stone-800 ${
+                viewMode === 'board' ? 'bg-amber-500/15 text-amber-400' : 'text-stone-500 hover:text-stone-300'
+              }`}>
+              <LayoutGrid size={13} /> Board
+            </button>
+          </div>
+
           <button onClick={resetSeed} title="Reset to default company list"
             className="px-3 py-2 text-xs text-stone-500 hover:text-stone-300 font-mono">
             reset
           </button>
         </div>
 
-        {/* List */}
-        <main className="max-w-6xl mx-auto px-6 py-6 relative z-10">
+        {/* Content */}
+        <main className={`mx-auto px-6 py-6 relative z-10 ${viewMode === 'board' ? 'max-w-[1800px]' : 'max-w-6xl'}`}>
           {filtered.length === 0 ? (
             <div className="text-center py-20 text-stone-500">
               <AlertCircle className="mx-auto mb-3 opacity-50" size={32} />
               <p className="text-sm">No companies match your filters.</p>
             </div>
+          ) : viewMode === 'board' ? (
+            <>
+              <div className="flex items-center justify-between mb-3 text-xs text-stone-500 font-mono">
+                <span>{filtered.length} {filtered.length === 1 ? 'company' : 'companies'} on board</span>
+                <span className="flex items-center gap-1.5">
+                  <GripVertical size={11} /> drag cards between columns to update status
+                </span>
+              </div>
+              <BoardView
+                items={filtered}
+                onOpen={setEditing}
+                onStatusChange={(id, newStatus) => {
+                  setItems(prev => prev.map(i => i.id === id ? { ...i, status: newStatus } : i));
+                }}
+              />
+            </>
           ) : (
             <>
               <div className="flex items-center justify-between mb-3 text-xs text-stone-500 font-mono">
@@ -1504,16 +2864,40 @@ export default function App() {
         </main>
 
         <footer className="max-w-6xl mx-auto px-6 py-8 text-center text-[11px] text-stone-600 font-mono border-t border-stone-800/60 mt-12">
-          <p>Data persists in this browser via localStorage.</p>
+          <p>
+            {gistConfig?.gistId
+              ? <>Synced to a private GitHub Gist · revision history preserved automatically</>
+              : <>Data cached on this device · click "Sync off" in header to enable cross-device sync</>}
+          </p>
           <p className="mt-1">Curated for: NIT Trichy '23 · Java/Spring · Distributed systems · Backend platform</p>
         </footer>
 
         {editing && (
           <DetailPanel
             item={editing}
+            profile={profile}
             onClose={() => setEditing(null)}
             onSave={onSave}
             onDelete={onDelete}
+          />
+        )}
+
+        {profileOpen && profile && (
+          <ProfileEditor
+            profile={profile}
+            onClose={() => setProfileOpen(false)}
+            onSave={(p) => setProfile(p)}
+          />
+        )}
+
+        {syncOpen && (
+          <SyncSetup
+            config={gistConfig}
+            currentItems={items}
+            currentProfile={profile}
+            onClose={() => setSyncOpen(false)}
+            onConfigured={handleSyncConfigured}
+            onDisconnect={handleSyncDisconnect}
           />
         )}
       </div>
